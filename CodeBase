@@ -1,0 +1,291 @@
+import uuid
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+import hashlib
+import sqlite3
+import requests
+import jwt
+from geopy.geocoders import Nominatim
+from geopy.distance import geodesic
+from pyfcm import FCMNotification
+
+@dataclass
+class LoyaltyCard:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ''  # Store/Brand name
+    card_number: str = ''
+    barcode: Optional[str] = None
+    qr_code: Optional[str] = None
+    category: str = 'General'
+    is_favorite: bool = False
+    store_chain: str = ''
+    added_date: datetime = field(default_factory=datetime.now)
+    
+
+@dataclass
+class Store:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ''
+    chain: str = ''
+    latitude: float = 0.0
+    longitude: float = 0.0
+    address: str = ''
+    contact_number: str = ''
+    associated_cards: List[str] = field(default_factory=list)
+
+@dataclass
+class Deal:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    title: str = ''
+    description: str = ''
+    store_chain: str = ''
+    start_date: datetime = field(default_factory=datetime.now)
+    end_date: datetime = field(default_factory=lambda: datetime.now() + timedelta(days=30))
+    discount_percentage: float = 0.0
+    categories: List[str] = field(default_factory=list)
+    personalization_score: float = 0.0
+
+class UserPreferenceEngine:
+    def __init__(self):
+        # Machine learning model placeholder for personalization
+        self.preference_model = None
+        self.user_interaction_history = {}
+
+    def calculate_personalization_score(self, deal: Deal, user_profile: Dict) -> float:
+        """
+        Advanced personalization scoring algorithm
+        """
+        # Factors for personalization
+        score_components = {
+            'category_match': self._calculate_category_match(deal, user_profile),
+            'store_preference': self._calculate_store_preference(deal, user_profile),
+            'historical_interaction': self._get_historical_interaction_score(deal)
+        }
+        
+        # Weighted scoring
+        total_score = (
+            score_components['category_match'] * 0.4 +
+            score_components['store_preference'] * 0.3 +
+            score_components['historical_interaction'] * 0.3
+        )
+        
+        return total_score
+
+    def _calculate_category_match(self, deal: Deal, user_profile: Dict) -> float:
+        # Compare deal categories with user's preferred categories
+        matched_categories = set(deal.categories) & set(user_profile.get('preferred_categories', []))
+        return len(matched_categories) / len(deal.categories) if deal.categories else 0
+
+    def _calculate_store_preference(self, deal: Deal, user_profile: Dict) -> float:
+        # Check user's store visit history and preferences
+        store_visits = user_profile.get('store_visit_history', {})
+        return store_visits.get(deal.store_chain, 0)
+
+    def _get_historical_interaction_score(self, deal: Deal) -> float:
+        # Use historical interaction data
+        return self.user_interaction_history.get(deal.id, 0.1)
+
+class GeolocationService:
+    def __init__(self):
+        self.geolocator = Nominatim(user_agent="loyalty_app")
+
+    def find_nearby_stores(self, user_location: tuple, stores: List[Store], max_distance_km=10) -> List[Store]:
+        """
+        Find stores within specified radius
+        """
+        nearby_stores = []
+        for store in stores:
+            store_location = (store.latitude, store.longitude)
+            distance = geodesic(user_location, store_location).kilometers
+            
+            if distance <= max_distance_km:
+                nearby_stores.append({
+                    'store': store,
+                    'distance': distance
+                })
+        
+        # Sort by distance
+        return sorted(nearby_stores, key=lambda x: x['distance'])
+
+class OfflineStorageManager:
+    def __init__(self, db_path='loyalty_app.db'):
+        self.conn = sqlite3.connect(db_path)
+        self._create_tables()
+
+    def _create_tables(self):
+        """
+        Create necessary tables for offline storage
+        """
+        tables = {
+            'loyalty_cards': '''
+                CREATE TABLE IF NOT EXISTS loyalty_cards (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    card_number TEXT,
+                    barcode TEXT,
+                    qr_code TEXT,
+                    category TEXT,
+                    is_favorite BOOLEAN,
+                    store_chain TEXT,
+                    added_date DATETIME
+                )
+            ''',
+            'stores': '''
+                CREATE TABLE IF NOT EXISTS stores (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    chain TEXT,
+                    latitude REAL,
+                    longitude REAL,
+                    address TEXT,
+                    contact_number TEXT
+                )
+            ''',
+            'deals': '''
+                CREATE TABLE IF NOT EXISTS deals (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    description TEXT,
+                    store_chain TEXT,
+                    start_date DATETIME,
+                    end_date DATETIME,
+                    discount_percentage REAL
+                )
+            '''
+        }
+
+        cursor = self.conn.cursor()
+        for table_name, create_query in tables.items():
+            cursor.execute(create_query)
+        self.conn.commit()
+
+    def save_loyalty_card(self, card: LoyaltyCard):
+        """
+        Save or update loyalty card in offline storage
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO loyalty_cards 
+            (id, name, card_number, barcode, qr_code, category, is_favorite, store_chain, added_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            card.id, card.name, card.card_number, card.barcode, card.qr_code, 
+            card.category, card.is_favorite, card.store_chain, card.added_date
+        ))
+        self.conn.commit()
+
+class CloudSyncService:
+    def __init__(self, api_endpoint='https://api.loyaltyapp.com'):
+        self.api_endpoint = api_endpoint
+        self.jwt_token = None
+
+    def authenticate(self, username: str, password: str):
+        """
+        Authenticate user and retrieve JWT token
+        """
+        # Secure password hashing
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        # Simulated authentication
+        response = requests.post(f'{self.api_endpoint}/auth', json={
+            'username': username,
+            'password': hashed_password
+        })
+        
+        if response.status_code == 200:
+            self.jwt_token = response.json()['token']
+            return True
+        return False
+
+    def sync_data(self, data: Dict):
+        """
+        Synchronize data across devices
+        """
+        if not self.jwt_token:
+            raise Exception("Not authenticated")
+        
+        headers = {
+            'Authorization': f'Bearer {self.jwt_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(f'{self.api_endpoint}/sync', 
+                                 json=data, 
+                                 headers=headers)
+        
+        return response.json()
+    
+
+class NotificationService:
+    def __init__(self, server_key):
+        self.push_service = FCMNotification(api_key=server_key)
+
+    def send_notification(self, registration_id, title, message):
+        result = self.push_service.notify_single_device(
+            registration_id=registration_id,
+            message_title=title,
+            message_body=message
+        )
+        return result
+    
+@dataclass
+class User:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    username: str = ''
+    email: str = ''
+    password_hash: str = ''
+    loyalty_cards: List[LoyaltyCard] = field(default_factory=list)
+
+class UserManager:
+    def register_user(self, username, email, password):
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        user = User(username=username, email=email, password_hash=password_hash)
+        # Save user to database (not shown)
+        return user
+
+    def authenticate_user(self, username, password):
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        # Verify user from database (not shown)
+        return True
+
+def main():
+    # Example workflow demonstration
+    preference_engine = UserPreferenceEngine()
+    geolocation_service = GeolocationService()
+    offline_storage = OfflineStorageManager()
+    cloud_sync = CloudSyncService()
+
+    # User authentication
+    if cloud_sync.authenticate('username', 'password'):
+        print("Authentication successful")
+
+    # Example loyalty card creation
+    pick_n_pay_card = LoyaltyCard(
+        name='Pick n Pay',
+        card_number='1234567890',
+        category='Supermarket',
+        store_chain='Pick n Pay'
+    )
+
+    # Save to offline storage
+    offline_storage.save_loyalty_card(pick_n_pay_card)
+
+    # Simulated deal personalization
+    deal = Deal(
+        title='Weekend Grocery Discount',
+        store_chain='Pick n Pay',
+        discount_percentage=20.0,
+        categories=['Groceries', 'Household']
+    )
+
+    user_profile = {
+        'preferred_categories': ['Groceries'],
+        'store_visit_history': {'Pick n Pay': 0.7}
+    }
+
+    personalization_score = preference_engine.calculate_personalization_score(deal, user_profile)
+    print(f"Deal Personalization Score: {personalization_score}")
+
+if __name__ == "__main__":
+    main()
